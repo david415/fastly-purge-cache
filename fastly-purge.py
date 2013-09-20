@@ -111,7 +111,10 @@ def main():
 
     This is crash only software and as such should crash early.
     We attempt to purge all the files asynchronously but if there is any kind of failure the program should immediately exit.
-    There is no retrying or self healing; just total sucess or fail.
+    There is no retrying or self healing; just total success or fail.
+
+    Get the last two commit IDs from a git repo and find generate a list of files
+    that were modified between them. Purge these files from Fastly CDN.
     """
     parser     = argparse.ArgumentParser()
     parser.add_argument('-v', '--verbose', dest='isVerbose', default=False, action="store_true", help="Verbose output.")
