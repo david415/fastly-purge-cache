@@ -40,7 +40,7 @@ def git_files_changed(oldcommit, newcommit):
     """Return a list of files modified between the two git commits."""
     cmd = "git log --name-status %s..%s" % (oldcommit, newcommit)
     lines = deploy.getCmd(cmd).splitlines()
-    changes = filter(isFileChangeLine, lines)
+    changes = itertools.ifilter(isFileChangeLine, lines)
     return [line.split()[1] for line in changes]
 
 class FastlyCachePurge():
