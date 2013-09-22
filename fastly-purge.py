@@ -129,11 +129,23 @@ def main():
     parser.add_argument("--api-key", dest='api_key', help="Fastly API key")
     parser.add_argument("--service-id", dest='service_id', help="Fastly service ID")
     parser.add_argument("--max-concurrency", dest='max_concurrency', type=int, default=10, help="Max async HTTP concurrency.")
+    parser.add_argument('-f','--files', nargs='+', help="Files to purge from cache.")
+
     args       = parser.parse_args()
 
+    # either get the file list from heroku git repo or from commandline
+    if args.heroku_app_git is not None and args.files is not None:
+        parser.print_help()
+        return
 
-    current_commit,previous_commit = heroku_get_last_releases(args.heroku_app, 2)
-    files = git_files_changed(previous_commit, current_commit)
+    if args.heroku_app_git is not None:
+        current_commit,previous_commit = heroku_get_last_releases(args.heroku_app, 2)
+        files = git_files_changed(previous_commit, current_commit)
+    elif args.files is not None:
+        files = args.files
+    else:
+        parser.print_help()
+        return
 
     fastly = FastlyCachePurge(api_key=args.api_key, service_id=args.service_id)
     yield fastly.async_purge(max_concurrency=args.max_concurrency, isVerbose=args.isVerbose, files=files)
