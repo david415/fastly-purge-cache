@@ -6,6 +6,7 @@ __author__ = "David Stainton"
 import argparse
 import sys
 import os
+import subprocess
 from tornado.httpclient import AsyncHTTPClient, HTTPRequest
 from tornado import ioloop
 from tornado import gen
@@ -13,9 +14,28 @@ import tornado.concurrent
 import re
 import itertools
 
-# internal imports
-import deploy
 
+def getCmd(cmd, verbose=False):
+    if verbose:
+        print cmd
+    output = read_cmd(cmd)
+    if verbose:
+        print output
+    return output
+
+def read_cmd(cmd,input=None,cwd=None):
+    """Run the given command and return its output string"""
+
+    pipe = subprocess.Popen(cmd,shell=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,stdin=subprocess.PIPE,cwd=cwd)
+    # communicate performs the wait for us
+    (out,err) = pipe.communicate( input )
+    returncode = pipe.poll()
+    if returncode == os.EX_OK:
+        return out
+    else:
+        if sys.stderr != None:
+            sys.stderr.write(err)
+        raise Exception( "read_cmd: %s exited with %s" % (cmd, returncode) )
 
 def isDeployLine(line):
     return re.match('^v\d+\s+Deploy', line) is not None
@@ -24,7 +44,7 @@ def heroku_get_last_releases(app, last_num):
     """Retrieve the last_num number of the latest release git commit IDs."""
 
     cmd = "heroku releases --app %s" % (app,)
-    lines = deploy.getCmd(cmd).splitlines()
+    lines = getCmd(cmd).splitlines()
     deploys = itertools.ifilter(isDeployLine, lines)
 
     latest_releases = []
@@ -39,7 +59,7 @@ def isFileChangeLine(line):
 def git_files_changed(oldcommit, newcommit):
     """Return a list of files modified between the two git commits."""
     cmd = "git log --name-status %s..%s" % (oldcommit, newcommit)
-    lines = deploy.getCmd(cmd).splitlines()
+    lines = getCmd(cmd).splitlines()
     changes = itertools.ifilter(isFileChangeLine, lines)
     return [line.split()[1] for line in changes]
 
@@ -50,44 +70,31 @@ class FastlyCachePurge():
         self.service_id      = service_id
         self.http_client     = None
 
+    @gen.coroutine
     def async_purge(self, files=None, max_concurrency=None, isVerbose=False):
         """Asynchronously purge all the files from the Fastly CDN cache."""
         self.files               = files
-        self.max_concurrency     = max_concurrency
         self.isVerbose           = isVerbose
-        self.current_concurrency = 0
-
-        if len(self.files) < self.max_concurrency:
-            self.max_concurrency = len(self.files)
 
         self.http_client = AsyncHTTPClient()
         AsyncHTTPClient.configure(None, max_clients=max_concurrency)
 
-        for i in range(self.max_concurrency):
-            future = self.fastly_purge_file(self.files.pop())
-            ioloop.IOLoop.instance().add_future(future, self.purge_callback)
+        workers = []
+        for i in range(min(len(self.files), max_concurrency)):
+            workers.append(self.purge_worker())
+        yield workers
 
-    def purge_callback(self, future):
-        """This callback function is invoked when the async task (fastly_purge_file) is completed.
-
-        When an async task is completed, this callback either enqueues another task, does nothing
-        or halts the program. In this manner we enforce a maximum concurrency."""
-        self.current_concurrency -= 1
-
-        if len(self.files) == 0 and self.current_concurrency == 0:
-            ioloop.IOLoop.instance().stop()
-        elif self.current_concurrency < self.max_concurrency and len(self.files) > 0:
-            future = self.fastly_purge_file(self.files.pop())
-            ioloop.IOLoop.instance().add_future(future, self.purge_callback)
-        else:
-            pass
+    @gen.coroutine
+    def purge_worker(self):
+        while self.files:
+            file = self.files.pop()
+            yield self.fastly_purge_file(file)
 
     @gen.coroutine
     def fastly_purge_file(self, file):
         """This asynchronous function tells the Fastly API to purge a file from cache.
 
         The coroutine decorator turns this function into a generator which yields a future object."""
-        self.current_concurrency += 1
 
         headers     = {'Fastly-Key':self.api_key}
         request_url = "https://api.fastly.com/service/%s/purge/%s" % (self.service_id, file)
@@ -95,17 +102,16 @@ class FastlyCachePurge():
                                   method  = 'POST',
                                   headers = headers,
                                   body    = '')
-
-        response = yield self.http_client.fetch(myRequest)
-
-        if response.error:
-            print "Error:", response.error
+        try:
+            print "http fetch: %s" % myRequest.url
+            #response = yield self.http_client.fetch(myRequest)
+        except tornado.httpclient.HTTPError as error:
+            print "HTTP fail with non-200 code: %s" % error.response
+            print "error response body: %s" % error.response.body
             sys.exit(1)
-        else:
-            if self.isVerbose:
-                print "Body:", response.body
 
 
+@gen.coroutine
 def main():
     """Fastly purge CDN cache.
 
@@ -130,10 +136,8 @@ def main():
     files = git_files_changed(previous_commit, current_commit)
 
     fastly = FastlyCachePurge(api_key=args.api_key, service_id=args.service_id)
-    fastly.async_purge(max_concurrency=args.max_concurrency, isVerbose=args.isVerbose, files=files)
-    ioloop.IOLoop.instance().start()
+    yield fastly.async_purge(max_concurrency=args.max_concurrency, isVerbose=args.isVerbose, files=files)
 
-    return os.EX_OK
 
 if __name__ == '__main__':
-    sys.exit(main())
+    ioloop.IOLoop.instance().run_sync(main)
